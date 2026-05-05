@@ -21,6 +21,9 @@ PHRASE_LEXICON_PATH = MODEL_ROOT / "bad_phrases.json"
 
 TOXIC_LABELS = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
 WORD_PATTERN = re.compile(r"[A-Za-z']+")
+SECOND_PERSON_TOKENS = {"you", "u", "you're", "youre", "ur"}
+LINKING_TOKENS = {"are", "r", "re", "be", "being", "been", "was", "were"}
+ARTICLE_TOKENS = {"a", "an", "the"}
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,6 +44,64 @@ def encode_text(text: str, vocab: dict[str, int], max_len: int) -> list[int]:
     if len(ids) < max_len:
         ids.extend([0] * (max_len - len(ids)))
     return ids
+
+
+def is_directed_insult_context(tokens: list[str], index: int) -> bool:
+    if index <= 0:
+        return False
+
+    prev = tokens[index - 1]
+    if prev in {"you", "u", "you're", "youre", "ur"}:
+        return True
+
+    if index >= 2:
+        two_back = tokens[index - 2]
+        if two_back in SECOND_PERSON_TOKENS and prev in LINKING_TOKENS:
+            return True
+
+    if index >= 3:
+        three_back = tokens[index - 3]
+        two_back = tokens[index - 2]
+        if (
+            three_back in SECOND_PERSON_TOKENS
+            and two_back in LINKING_TOKENS
+            and prev in ARTICLE_TOKENS
+        ):
+            return True
+
+    if index >= 4:
+        four_back = tokens[index - 4]
+        three_back = tokens[index - 3]
+        two_back = tokens[index - 2]
+        if (
+            four_back in SECOND_PERSON_TOKENS
+            and three_back in LINKING_TOKENS
+            and two_back == "such"
+            and prev in {"a", "an"}
+        ):
+            return True
+
+    return False
+
+
+def build_contextual_phrase_templates(word: str) -> set[str]:
+    return {
+        f"you are {word}",
+        f"you are a {word}",
+        f"you are an {word}",
+        f"you are the {word}",
+        f"you are such a {word}",
+        f"you're {word}",
+        f"you're a {word}",
+        f"you're an {word}",
+        f"youre {word}",
+        f"youre a {word}",
+        f"youre an {word}",
+        f"u r {word}",
+        f"u r a {word}",
+        f"u r an {word}",
+        f"you {word}",
+    }
 
 
 def load_training_data(
@@ -98,6 +159,8 @@ def build_lexicons(
     labels: list[int],
     word_min_count: int = 25,
     word_toxic_threshold: float = 0.62,
+    strong_word_toxic_threshold: float = 0.90,
+    directed_word_threshold: float = 0.55,
     max_words: int = 3000,
     phrase_min_count: int = 6,
     phrase_toxic_threshold: float = 0.72,
@@ -107,6 +170,7 @@ def build_lexicons(
 
     toxic_word_counts: Counter = Counter()
     clean_word_counts: Counter = Counter()
+    toxic_directed_word_counts: Counter = Counter()
     toxic_phrase_counts: Counter = Counter()
 
     for text, label in tqdm(
@@ -123,6 +187,12 @@ def build_lexicons(
 
         if label == 1:
             toxic_word_counts.update(word_set)
+            directed_word_set = {
+                tokens[idx]
+                for idx in range(len(tokens))
+                if is_directed_insult_context(tokens, idx)
+            }
+            toxic_directed_word_counts.update(directed_word_set)
             ngrams: set[tuple] = set()
             for n in range(2, max_n + 1):
                 if len(tokens) < n:
@@ -189,8 +259,21 @@ def build_lexicons(
         phrase_min_count, phrase_toxic_threshold, max_phrases,
     )
 
-    bad_words = {w for w, _, _ in word_scored}
+    bad_words: set[str] = set()
+    contextual_words: set[str] = set()
+    for word, toxic_ratio, _ in word_scored:
+        directed_ratio = (toxic_directed_word_counts[word] + 1) / (toxic_word_counts[word] + 2)
+        if toxic_ratio >= strong_word_toxic_threshold or directed_ratio >= directed_word_threshold:
+            bad_words.add(word)
+        else:
+            contextual_words.add(word)
+
     bad_phrases = {" ".join(p) for p, _, _ in phrase_scored}
+    for word in contextual_words:
+        bad_phrases.update(build_contextual_phrase_templates(word))
+
+    print(f"  Standalone toxic words: {len(bad_words):,}")
+    print(f"  Contextual-only words: {len(contextual_words):,}")
     return bad_words, bad_phrases
 
 
