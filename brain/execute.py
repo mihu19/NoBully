@@ -1,4 +1,3 @@
-import json
 import re
 from pathlib import Path
 
@@ -11,9 +10,20 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_ROOT = BASE_DIR / "models"
 BRED_DIR = MODEL_ROOT / "bred_bert"
 LSTM_PATH = MODEL_ROOT / "lstm_classifier.pt"
-LEXICON_PATH = MODEL_ROOT / "bad_words.json"
-PHRASE_LEXICON_PATH = MODEL_ROOT / "bad_phrases.json"
 WORD_PATTERN = re.compile(r"[A-Za-z']+")
+NEUTRAL_THRESHOLD = 0.20
+BULLY_THRESHOLD = 0.50
+SEVERITY_BANDS = (
+    (0.25, 1),
+    (0.30, 2),
+    (0.35, 3),
+    (0.425, 4),
+    (BULLY_THRESHOLD, 5),
+    (0.60, 6),
+    (0.70, 7),
+    (0.85, 8),
+    (0.95, 9),
+)
 
 
 def tokenize_words(text: str) -> list[str]:
@@ -25,18 +35,6 @@ def encode_text(text: str, vocab: dict[str, int], max_len: int) -> list[int]:
     if len(ids) < max_len:
         ids.extend([0] * (max_len - len(ids)))
     return ids
-
-
-def load_lexicon() -> tuple[set[str], set[str]]:
-    words = set()
-    phrases = set()
-    if LEXICON_PATH.exists():
-        with LEXICON_PATH.open("r", encoding="utf-8") as file:
-            words = set(json.load(file))
-    if PHRASE_LEXICON_PATH.exists():
-        with PHRASE_LEXICON_PATH.open("r", encoding="utf-8") as file:
-            phrases = set(json.load(file))
-    return words, phrases
 
 
 class LSTMClassifier(nn.Module):
@@ -110,97 +108,20 @@ def predict_lstm_probability(text: str, model, vocab, max_len: int, device) -> f
     return float(prob)
 
 
-def highlight_toxic_content(
-    text: str, bad_words: set[str], bad_phrases: set[str]
-) -> tuple[str, list[str], list[str]]:
-    tokens = [(m.group(0), m.group(0).lower(), m.start(), m.end()) for m in WORD_PATTERN.finditer(text)]
-    if not tokens:
-        return text, [], []
-
-    phrase_tuples = {tuple(phrase.split()) for phrase in bad_phrases if phrase}
-    phrases_by_length = {}
-    for phrase_tokens in phrase_tuples:
-        phrases_by_length.setdefault(len(phrase_tokens), set()).add(phrase_tokens)
-    phrase_lengths = sorted(phrases_by_length.keys(), reverse=True)
-
-    matched_token_indexes = set()
-    spans: list[tuple[int, int]] = []
-    found_phrases = []
-    seen_phrases = set()
-    lower_tokens = [token[1] for token in tokens]
-
-    i = 0
-    while i < len(tokens):
-        matched = False
-        for length in phrase_lengths:
-            if i + length > len(tokens):
-                continue
-            candidate = tuple(lower_tokens[i : i + length])
-            if candidate in phrases_by_length[length]:
-                start = tokens[i][2]
-                end = tokens[i + length - 1][3]
-                spans.append((start, end))
-                for token_idx in range(i, i + length):
-                    matched_token_indexes.add(token_idx)
-                canonical_phrase = " ".join(candidate)
-                if canonical_phrase not in seen_phrases:
-                    found_phrases.append(" ".join(tokens[token_idx][0] for token_idx in range(i, i + length)))
-                    seen_phrases.add(canonical_phrase)
-                i += length
-                matched = True
-                break
-        if not matched:
-            i += 1
-
-    found_words = []
-    seen_words = set()
-    for token_idx, (word, lower_word, start, end) in enumerate(tokens):
-        if token_idx in matched_token_indexes:
-            continue
-        if lower_word in bad_words:
-            spans.append((start, end))
-            if lower_word not in seen_words:
-                found_words.append(word)
-                seen_words.add(lower_word)
-
-    spans.sort(key=lambda x: x[0])
-    highlighted_parts = []
-    last_idx = 0
-    for start, end in spans:
-        if start < last_idx:
-            continue
-        highlighted_parts.append(text[last_idx:start])
-        highlighted_parts.append(f"\033[91m{text[start:end]}\033[0m")
-        last_idx = end
-    highlighted_parts.append(text[last_idx:])
-    highlighted = "".join(highlighted_parts)
-    return highlighted, found_phrases, found_words
-
-
 def score_toxicity(
     probability: float,
-    phrase_match_count: int,
-    word_match_count: int,
-    token_count: int,
-    neutral_threshold: float = 0.20,
+    neutral_threshold: float = NEUTRAL_THRESHOLD,
 ) -> tuple[int, int]:
     probability = max(0.0, min(1.0, probability))
+    toxicity_percent = int(round(probability * 100))
+    if probability <= neutral_threshold:
+        return 0, toxicity_percent
 
-    if token_count <= 0:
-        token_count = 1
+    for upper_bound, severity in SEVERITY_BANDS:
+        if probability < upper_bound:
+            return severity, toxicity_percent
 
-    model_component = probability * 8.0
-    lexicon_density = (phrase_match_count * 2 + word_match_count) / token_count
-    lexicon_component = min(2.0, lexicon_density * 3.5)
-    raw_score = max(0.0, min(10.0, model_component + lexicon_component))
-
-    has_lexicon_match = (phrase_match_count + word_match_count) > 0
-    if not has_lexicon_match and probability < neutral_threshold:
-        return 0, int(round(raw_score * 10))
-
-    severity = int(round(raw_score))
-    severity = max(1, min(10, severity))
-    return severity, int(round(raw_score * 10))
+    return 10, toxicity_percent
 
 
 def main() -> None:
@@ -210,7 +131,6 @@ def main() -> None:
         print("Models were not found. Please run train.py first.")
         return
 
-    bad_words, bad_phrases = load_lexicon()
     print("Models loaded. Type 'exit' to quit.")
 
     while True:
@@ -223,28 +143,10 @@ def main() -> None:
         bred_prob = predict_bred_probability(phrase, tokenizer, bred_model, bred_device)
         lstm_prob = predict_lstm_probability(phrase, lstm_model, vocab, max_len, lstm_device)
         combined_prob = 0.6 * bred_prob + 0.4 * lstm_prob
-        highlighted_text, found_phrases, found_words = highlight_toxic_content(phrase, bad_words, bad_phrases)
-        has_highlights = bool(found_phrases or found_words)
-        token_count = len(tokenize_words(phrase))
-        severity, toxicity_percent = score_toxicity(
-            combined_prob,
-            phrase_match_count=len(found_phrases),
-            word_match_count=len(found_words),
-            token_count=token_count,
-        )
+        severity, toxicity_percent = score_toxicity(combined_prob)
 
         print(f"Severity (0-10): {severity}")
         print(f"Toxicity: {toxicity_percent}%")
-        if has_highlights:
-            print(f"Highlighted: {highlighted_text}")
-        if found_phrases:
-            print(f"Detected bad phrases: {', '.join(found_phrases)}")
-        else:
-            print("Detected bad phrases: none")
-        if found_words:
-            print(f"Detected bad words: {', '.join(found_words)}")
-        else:
-            print("Detected bad words: none")
 
 
 if __name__ == "__main__":

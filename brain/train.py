@@ -1,4 +1,3 @@
-import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -13,17 +12,30 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+CURATED_DATA_DIR = BASE_DIR / "curated_data"
 MODEL_ROOT = BASE_DIR / "models"
 BRED_DIR = MODEL_ROOT / "bred_bert"
 LSTM_PATH = MODEL_ROOT / "lstm_classifier.pt"
-LEXICON_PATH = MODEL_ROOT / "bad_words.json"
-PHRASE_LEXICON_PATH = MODEL_ROOT / "bad_phrases.json"
+CURATED_REPEAT = 40
+BASE_BERT_MODEL = "distilbert-base-uncased"
+MAX_SAMPLE_WEIGHT = 6.0
 
 TOXIC_LABELS = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
 WORD_PATTERN = re.compile(r"[A-Za-z']+")
-SECOND_PERSON_TOKENS = {"you", "u", "you're", "youre", "ur"}
-LINKING_TOKENS = {"are", "r", "re", "be", "being", "been", "was", "were"}
-ARTICLE_TOKENS = {"a", "an", "the"}
+HIGH_PRIORITY_CATEGORIES = {
+    "threat": 5.0,
+    "indirect_threat": 5.5,
+    "intimidation": 4.5,
+    "coercion": 4.0,
+    "identity_attack": 3.5,
+    "dehumanization": 3.5,
+    "sexual_harassment": 3.5,
+    "harassment": 3.0,
+    "insult": 2.5,
+    "quoted_abuse": 2.0,
+    "hard_negative": 2.0,
+    "neutral_context": 1.8,
+}
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,254 +58,147 @@ def encode_text(text: str, vocab: dict[str, int], max_len: int) -> list[int]:
     return ids
 
 
-def is_directed_insult_context(tokens: list[str], index: int) -> bool:
-    if index <= 0:
-        return False
-
-    prev = tokens[index - 1]
-    if prev in {"you", "u", "you're", "youre", "ur"}:
-        return True
-
-    if index >= 2:
-        two_back = tokens[index - 2]
-        if two_back in SECOND_PERSON_TOKENS and prev in LINKING_TOKENS:
-            return True
-
-    if index >= 3:
-        three_back = tokens[index - 3]
-        two_back = tokens[index - 2]
-        if (
-            three_back in SECOND_PERSON_TOKENS
-            and two_back in LINKING_TOKENS
-            and prev in ARTICLE_TOKENS
-        ):
-            return True
-
-    if index >= 4:
-        four_back = tokens[index - 4]
-        three_back = tokens[index - 3]
-        two_back = tokens[index - 2]
-        if (
-            four_back in SECOND_PERSON_TOKENS
-            and three_back in LINKING_TOKENS
-            and two_back == "such"
-            and prev in {"a", "an"}
-        ):
-            return True
-
-    return False
-
-
-def build_contextual_phrase_templates(word: str) -> set[str]:
+def split_tags(value) -> set[str]:
+    if pd.isna(value):
+        return set()
     return {
-        f"you are {word}",
-        f"you are a {word}",
-        f"you are an {word}",
-        f"you are the {word}",
-        f"you are such a {word}",
-        f"you're {word}",
-        f"you're a {word}",
-        f"you're an {word}",
-        f"youre {word}",
-        f"youre a {word}",
-        f"youre an {word}",
-        f"u r {word}",
-        f"u r a {word}",
-        f"u r an {word}",
-        f"you {word}",
+        tag.strip().lower()
+        for tag in re.split(r"[|,;/\s]+", str(value))
+        if tag.strip()
     }
+
+
+def compute_sample_weight(row: pd.Series) -> float:
+    explicit_weight = row.get("sample_weight", row.get("weight"))
+    if explicit_weight is not None and not pd.isna(explicit_weight):
+        try:
+            return max(0.1, min(MAX_SAMPLE_WEIGHT, float(explicit_weight)))
+        except ValueError:
+            pass
+
+    weight = 1.0
+
+    for column, column_weight in (
+        ("threat", 5.0),
+        ("severe_toxic", 4.0),
+        ("severe_toxicity", 4.0),
+        ("identity_hate", 3.5),
+        ("identity_attack", 3.5),
+        ("insult", 2.5),
+        ("obscene", 2.0),
+    ):
+        value = row.get(column)
+        if value is None or pd.isna(value):
+            continue
+        try:
+            if float(value) > 0:
+                weight = max(weight, column_weight)
+        except ValueError:
+            continue
+
+    for column in ("category", "flags"):
+        for tag in split_tags(row.get(column)):
+            weight = max(weight, HIGH_PRIORITY_CATEGORIES.get(tag, 1.0))
+
+    severity = row.get("severity")
+    if severity is not None and not pd.isna(severity):
+        try:
+            weight = max(weight, 1.0 + float(severity) / 2.5)
+        except ValueError:
+            pass
+
+    return min(weight, MAX_SAMPLE_WEIGHT)
+
+
+def load_training_frame(csv_file: Path, nrows: int | None = None) -> pd.DataFrame | None:
+    df = pd.read_csv(csv_file, nrows=nrows)
+
+    if "comment_text" not in df.columns and "text" in df.columns:
+        df = df.rename(columns={"text": "comment_text"})
+
+    if "toxic" not in df.columns:
+        label_columns = [c for c in TOXIC_LABELS if c in df.columns]
+        if label_columns:
+            df["toxic"] = df[label_columns].fillna(0).max(axis=1).astype(int)
+        elif "label" in df.columns:
+            df["toxic"] = df["label"].astype(int)
+        elif "toxicity" in df.columns:
+            df["toxic"] = (df["toxicity"] >= 0.5).astype(int)
+        else:
+            return None
+
+    if "comment_text" not in df.columns:
+        return None
+
+    frame = df.dropna(subset=["comment_text"]).copy()
+    frame["comment_text"] = frame["comment_text"].astype(str)
+    frame["toxic"] = frame["toxic"].astype(int)
+    frame["sample_weight"] = frame.apply(compute_sample_weight, axis=1).astype(float)
+    frame = frame[["comment_text", "toxic", "sample_weight"]]
+    return frame
 
 
 def load_training_data(
     max_train_samples: int | None = None,
-) -> tuple[list[str], list[int], list[str]]:
-    csv_files = sorted(DATA_DIR.glob("*.csv"))
-    if not csv_files:
-        raise RuntimeError(f"No CSV files found in {DATA_DIR}.")
-
+    curated_repeat: int = CURATED_REPEAT,
+) -> tuple[list[str], list[int], list[float], list[str]]:
     texts: list[str] = []
     labels: list[int] = []
+    sample_weights: list[float] = []
     loaded_files: list[str] = []
 
-    for csv_file in csv_files:
-        df = pd.read_csv(csv_file)
+    for csv_file in sorted(DATA_DIR.glob("*.csv")):
+        remaining = None if max_train_samples is None else max_train_samples - len(texts)
+        if remaining is not None and remaining <= 0:
+            break
 
-        if "comment_text" not in df.columns and "text" in df.columns:
-            df = df.rename(columns={"text": "comment_text"})
-
-        if "toxic" not in df.columns:
-            label_columns = [c for c in TOXIC_LABELS if c in df.columns]
-            if label_columns:
-                df["toxic"] = df[label_columns].fillna(0).max(axis=1).astype(int)
-            elif "label" in df.columns:
-                df["toxic"] = df["label"].astype(int)
-            elif "toxicity" in df.columns:
-                df["toxic"] = (df["toxicity"] >= 0.5).astype(int)
-            else:
-                continue
-
-        if "comment_text" not in df.columns:
+        frame = load_training_frame(csv_file, nrows=remaining)
+        if frame is None:
             continue
 
-        frame = df[["comment_text", "toxic"]].dropna(subset=["comment_text"]).copy()
-        frame["comment_text"] = frame["comment_text"].astype(str)
-
-        if max_train_samples is not None:
-            remaining = max_train_samples - len(texts)
-            if remaining <= 0:
-                break
-            frame = frame.head(remaining)
+        if frame.empty:
+            continue
 
         texts.extend(frame["comment_text"].tolist())
-        labels.extend(frame["toxic"].astype(int).tolist())
-        loaded_files.append(csv_file.name)
+        labels.extend(frame["toxic"].tolist())
+        sample_weights.extend(frame["sample_weight"].tolist())
+        loaded_files.append(f"data/{csv_file.name}")
+
+    if curated_repeat > 0 and CURATED_DATA_DIR.exists():
+        for csv_file in sorted(CURATED_DATA_DIR.glob("*.csv")):
+            frame = load_training_frame(csv_file)
+            if frame is None or frame.empty:
+                continue
+
+            curated_texts = frame["comment_text"].tolist()
+            curated_labels = frame["toxic"].tolist()
+            curated_weights = frame["sample_weight"].tolist()
+            for _ in range(curated_repeat):
+                texts.extend(curated_texts)
+                labels.extend(curated_labels)
+                sample_weights.extend(curated_weights)
+            loaded_files.append(f"curated_data/{csv_file.name} x{curated_repeat}")
 
     if not texts:
-        raise RuntimeError(f"No usable training rows found in {DATA_DIR}.")
+        raise RuntimeError(
+            f"No usable training rows found in {DATA_DIR} or {CURATED_DATA_DIR}."
+        )
 
-    return texts, labels, loaded_files
+    return texts, labels, sample_weights, loaded_files
 
-
-def build_lexicons(
-    texts: list[str],
-    labels: list[int],
-    word_min_count: int = 25,
-    word_toxic_threshold: float = 0.62,
-    strong_word_toxic_threshold: float = 0.90,
-    directed_word_threshold: float = 0.55,
-    max_words: int = 3000,
-    phrase_min_count: int = 6,
-    phrase_toxic_threshold: float = 0.72,
-    max_phrases: int = 4000,
-    max_n: int = 4,
-) -> tuple[set[str], set[str]]:
-
-    toxic_word_counts: Counter = Counter()
-    clean_word_counts: Counter = Counter()
-    toxic_directed_word_counts: Counter = Counter()
-    toxic_phrase_counts: Counter = Counter()
-
-    for text, label in tqdm(
-        zip(texts, labels),
-        total=len(texts),
-        desc="Lexicon pass 1/2",
-        unit="text",
-    ):
-        tokens = tokenize_words(text)
-        if not tokens:
-            continue
-
-        word_set = set(tokens)
-
-        if label == 1:
-            toxic_word_counts.update(word_set)
-            directed_word_set = {
-                tokens[idx]
-                for idx in range(len(tokens))
-                if is_directed_insult_context(tokens, idx)
-            }
-            toxic_directed_word_counts.update(directed_word_set)
-            ngrams: set[tuple] = set()
-            for n in range(2, max_n + 1):
-                if len(tokens) < n:
-                    break
-                ngrams.update(
-                    tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)
-                )
-            toxic_phrase_counts.update(ngrams)
-        else:
-            clean_word_counts.update(word_set)
-
-    candidate_phrases: set[tuple] = {
-        phrase
-        for phrase, count in toxic_phrase_counts.items()
-        if count >= phrase_min_count
-    }
-    print(f"  Candidate phrases after pass 1: {len(candidate_phrases):,}")
-
-    clean_phrase_counts: Counter = Counter()
-
-    for text, label in tqdm(
-        zip(texts, labels),
-        total=len(texts),
-        desc="Lexicon pass 2/2",
-        unit="text",
-    ):
-        if label == 1:
-            continue 
-        tokens = tokenize_words(text)
-        if len(tokens) < 2:
-            continue
-        for n in range(2, max_n + 1):
-            if len(tokens) < n:
-                break
-            for i in range(len(tokens) - n + 1):
-                ngram = tuple(tokens[i : i + n])
-                if ngram in candidate_phrases:
-                    clean_phrase_counts[ngram] += 1
-
-    def score_and_filter(
-        toxic_counts: Counter,
-        clean_counts: Counter,
-        min_count: int,
-        threshold: float,
-        max_items: int,
-    ) -> list:
-        scored = []
-        for key, toxic_count in toxic_counts.items():
-            total = toxic_count + clean_counts[key]
-            if total < min_count:
-                continue
-            ratio = (toxic_count + 1) / (total + 2)
-            if ratio >= threshold:
-                scored.append((key, ratio, total))
-        scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
-        return scored[:max_items]
-
-    word_scored = score_and_filter(
-        toxic_word_counts, clean_word_counts,
-        word_min_count, word_toxic_threshold, max_words,
-    )
-    phrase_scored = score_and_filter(
-        toxic_phrase_counts, clean_phrase_counts,
-        phrase_min_count, phrase_toxic_threshold, max_phrases,
-    )
-
-    bad_words: set[str] = set()
-    contextual_words: set[str] = set()
-    for word, toxic_ratio, _ in word_scored:
-        directed_ratio = (toxic_directed_word_counts[word] + 1) / (toxic_word_counts[word] + 2)
-        if toxic_ratio >= strong_word_toxic_threshold or directed_ratio >= directed_word_threshold:
-            bad_words.add(word)
-        else:
-            contextual_words.add(word)
-
-    bad_phrases = {" ".join(p) for p, _, _ in phrase_scored}
-    for word in contextual_words:
-        bad_phrases.update(build_contextual_phrase_templates(word))
-
-    print(f"  Standalone toxic words: {len(bad_words):,}")
-    print(f"  Contextual-only words: {len(contextual_words):,}")
-    return bad_words, bad_phrases
-
-
-def save_lexicon(words: set[str], phrases: set[str]) -> None:
-    MODEL_ROOT.mkdir(parents=True, exist_ok=True)
-    with LEXICON_PATH.open("w", encoding="utf-8") as f:
-        json.dump(sorted(words), f, ensure_ascii=True, indent=2)
-    with PHRASE_LEXICON_PATH.open("w", encoding="utf-8") as f:
-        json.dump(sorted(phrases), f, ensure_ascii=True, indent=2)
 
 class BertDataset(Dataset):
     def __init__(
         self,
         texts: list[str],
         labels: list[int],
+        sample_weights: list[float],
         tokenizer,
         max_len: int = 160,
     ):
         self.texts = texts
         self.labels = labels
+        self.sample_weights = sample_weights
         self.tokenizer = tokenizer
         self.max_len = max_len
         self._cache: dict[int, dict] = {}
@@ -319,6 +224,7 @@ class BertDataset(Dataset):
             "input_ids": cached["input_ids"],
             "attention_mask": cached["attention_mask"],
             "labels": torch.tensor(self.labels[idx], dtype=torch.long),
+            "weights": torch.tensor(self.sample_weights[idx], dtype=torch.float32),
         }
 
 
@@ -327,11 +233,13 @@ class LSTMTextDataset(Dataset):
         self,
         texts: list[str],
         labels: list[int],
+        sample_weights: list[float],
         vocab: dict[str, int],
         max_len: int = 120,
     ):
         self.texts = texts
         self.labels = labels
+        self.sample_weights = sample_weights
         self.vocab = vocab
         self.max_len = max_len
         self._cache: dict[int, torch.Tensor] = {}
@@ -348,6 +256,7 @@ class LSTMTextDataset(Dataset):
         return {
             "input_ids": self._cache[idx],
             "labels": torch.tensor(self.labels[idx], dtype=torch.float32),
+            "weights": torch.tensor(self.sample_weights[idx], dtype=torch.float32),
         }
 
 
@@ -390,13 +299,17 @@ class LSTMClassifier(nn.Module):
 def train_bred_bert(
     train_texts: list[str],
     train_labels: list[int],
+    train_weights: list[float],
     epochs: int,
     batch_size: int = 32,
     lr: float = 2e-5,
 ) -> None:
-    tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+    model_source = (
+        str(BRED_DIR) if (BRED_DIR / "config.json").exists() else BASE_BERT_MODEL
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_source)
 
-    dataset = BertDataset(train_texts, train_labels, tokenizer)
+    dataset = BertDataset(train_texts, train_labels, train_weights, tokenizer)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -406,13 +319,12 @@ def train_bred_bert(
         persistent_workers=True,
     )
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        "distilbert-base-uncased", num_labels=2
-    )
+    model = AutoModelForSequenceClassification.from_pretrained(model_source, num_labels=2)
     model.to(DEVICE)
     model.train()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss(reduction="none")
     scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE.type == "cuda"))
 
     for epoch in range(1, epochs + 1):
@@ -423,15 +335,16 @@ def train_bred_bert(
             input_ids = batch["input_ids"].to(DEVICE, non_blocking=True)
             attention_mask = batch["attention_mask"].to(DEVICE, non_blocking=True)
             labels = batch["labels"].to(DEVICE, non_blocking=True)
+            weights = batch["weights"].to(DEVICE, non_blocking=True)
 
             optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=(DEVICE.type == "cuda")):
-                loss = model(
+                logits = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    labels=labels,
-                ).loss
+                ).logits
+                loss = (criterion(logits, labels) * weights).mean()
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -451,13 +364,14 @@ def train_bred_bert(
 def train_lstm(
     train_texts: list[str],
     train_labels: list[int],
+    train_weights: list[float],
     epochs: int,
     batch_size: int = 512,
     lr: float = 1e-3,
     max_len: int = 120,
 ) -> None:
     vocab = build_vocab(train_texts)
-    dataset = LSTMTextDataset(train_texts, train_labels, vocab, max_len=max_len)
+    dataset = LSTMTextDataset(train_texts, train_labels, train_weights, vocab, max_len=max_len)
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -468,7 +382,7 @@ def train_lstm(
     )
 
     model = LSTMClassifier(vocab_size=len(vocab)).to(DEVICE)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE.type == "cuda"))
 
@@ -480,11 +394,12 @@ def train_lstm(
         for batch in progress:
             input_ids = batch["input_ids"].to(DEVICE, non_blocking=True)
             labels = batch["labels"].to(DEVICE, non_blocking=True)
+            weights = batch["weights"].to(DEVICE, non_blocking=True)
 
             optimizer.zero_grad()
 
             with torch.cuda.amp.autocast(enabled=(DEVICE.type == "cuda")):
-                loss = criterion(model(input_ids), labels)
+                loss = (criterion(model(input_ids), labels) * weights).mean()
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -523,7 +438,9 @@ def main() -> None:
 
     print("\nLoading dataset...")
     try:
-        train_texts, train_labels, loaded_files = load_training_data(max_train_samples=max_samples)
+        train_texts, train_labels, train_weights, loaded_files = load_training_data(
+            max_train_samples=max_samples
+        )
     except RuntimeError as error:
         print(error)
         return
@@ -532,16 +449,11 @@ def main() -> None:
     for name in loaded_files:
         print(f"  - {name}")
 
-    print("\nBuilding toxic word/phrase lexicons...")
-    bad_words, bad_phrases = build_lexicons(train_texts, train_labels)
-    save_lexicon(bad_words, bad_phrases)
-    print(f"Saved {len(bad_words):,} words and {len(bad_phrases):,} phrases.\n")
-
     print("Training BRED (DistilBERT)...")
-    train_bred_bert(train_texts, train_labels, epochs=epochs)
+    train_bred_bert(train_texts, train_labels, train_weights, epochs=epochs)
 
     print("\nTraining LSTM...")
-    train_lstm(train_texts, train_labels, epochs=epochs)
+    train_lstm(train_texts, train_labels, train_weights, epochs=epochs)
 
     print("\nAll training complete.")
 
