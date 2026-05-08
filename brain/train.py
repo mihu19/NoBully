@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from polish import train_polish_layer
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -454,6 +456,9 @@ def main() -> None:
 
     print("\nTraining LSTM...")
     train_lstm(train_texts, train_labels, train_weights, epochs=epochs)
+
+    print("\nTraining polish layer...")
+    train_polish_layer()
 
     print("\nAll training complete.")
 

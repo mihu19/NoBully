@@ -12,12 +12,14 @@ MODEL_ROOT = BASE_DIR / "models"
 WORD_PATTERN = re.compile(r"[A-Za-z']+")
 WHITESPACE_PATTERN = re.compile(r"\s+")
 EXIT_COMMANDS = {"exit", "quit"}
+FLAGGED_WORD_MIN_SALIENCY_RATIO = 0.75
 
 
 @dataclass(frozen=True)
 class ModelPaths:
     bert_directory: Path
     lstm_checkpoint: Path
+    polish_checkpoint: Path
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,9 @@ class LoadedModels:
     lstm_vocab: dict[str, int]
     lstm_max_tokens: int
     lstm_device: torch.device
+    polish_layer: Any | None
+    polish_feature_names: tuple[str, ...]
+    polish_device: torch.device
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,7 @@ class WordImpact:
 DEFAULT_MODEL_PATHS = ModelPaths(
     bert_directory=MODEL_ROOT / "bred_bert",
     lstm_checkpoint=MODEL_ROOT / "lstm_classifier.pt",
+    polish_checkpoint=MODEL_ROOT / "polish_layer.pt",
 )
 
 DEFAULT_INFERENCE_CONFIG = InferenceConfig(
@@ -248,6 +254,28 @@ def load_lstm_model(
     return model, vocab, max_tokens, device
 
 
+# load the optional polish layer that calibrates the main model outputs
+def load_polish_model(paths: ModelPaths) -> tuple[Any | None, tuple[str, ...], torch.device]:
+    device = get_available_device()
+
+    if not paths.polish_checkpoint.exists():
+        return None, (), device
+
+    try:
+        from polish import load_polish_layer
+
+        polish_layer, feature_names = load_polish_layer(
+            path=paths.polish_checkpoint,
+            device=device,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"Could not load polish layer from: {paths.polish_checkpoint}"
+        ) from error
+
+    return polish_layer, feature_names, device
+
+
 # load all models needed for phrase analysis
 def load_models(
     paths: ModelPaths = DEFAULT_MODEL_PATHS,
@@ -258,6 +286,7 @@ def load_models(
         paths,
         config,
     )
+    polish_layer, polish_feature_names, polish_device = load_polish_model(paths)
     return LoadedModels(
         tokenizer=tokenizer,
         bert_model=bert_model,
@@ -266,6 +295,9 @@ def load_models(
         lstm_vocab=lstm_vocab,
         lstm_max_tokens=lstm_max_tokens,
         lstm_device=lstm_device,
+        polish_layer=polish_layer,
+        polish_feature_names=polish_feature_names,
+        polish_device=polish_device,
     )
 
 
@@ -328,6 +360,33 @@ def combine_probabilities(
     )
 
 
+# run the optional polish layer over raw main-model probabilities
+def apply_polish_layer(
+    text: str,
+    bert_probability: float,
+    lstm_probability: float,
+    combined_probability: float,
+    models: LoadedModels,
+) -> float:
+    if models.polish_layer is None:
+        return combined_probability
+
+    try:
+        from polish import predict_polished_probability
+
+        return predict_polished_probability(
+            text=text,
+            bert_probability=bert_probability,
+            lstm_probability=lstm_probability,
+            combined_probability=combined_probability,
+            polish_layer=models.polish_layer,
+            feature_names=models.polish_feature_names,
+            device=models.polish_device,
+        )
+    except Exception:
+        return combined_probability
+
+
 # predict the final toxicity probability for a phrase
 def predict_toxicity_probability(
     text: str,
@@ -336,7 +395,18 @@ def predict_toxicity_probability(
 ) -> float:
     bert_probability = predict_bert_probability(text, models, config)
     lstm_probability = predict_lstm_probability(text, models, config)
-    return combine_probabilities(bert_probability, lstm_probability, config)
+    combined_probability = combine_probabilities(
+        bert_probability=bert_probability,
+        lstm_probability=lstm_probability,
+        config=config,
+    )
+    return apply_polish_layer(
+        text=text,
+        bert_probability=bert_probability,
+        lstm_probability=lstm_probability,
+        combined_probability=combined_probability,
+        models=models,
+    )
 
 
 # keep a probability inside the valid zero to one range
@@ -359,11 +429,7 @@ def calculate_severity_percent(
     if probability <= config.neutral_probability_threshold:
         return 0
 
-    for band in config.severity_bands:
-        if probability < band.upper_probability:
-            return band.severity_percent
-
-    return 100
+    return probability_to_percent(probability)
 
 
 # remove all occurrences of one word from text
@@ -384,6 +450,97 @@ def unique_words_with_original_spelling(text: str) -> dict[str, str]:
         words.setdefault(lowercased_word, match.group(0))
 
     return words
+
+
+# measure which words the BERT model used most for the toxic class
+def calculate_bert_word_saliency(
+    text: str,
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> list[WordImpact]:
+    word_matches = list(WORD_PATTERN.finditer(text))
+
+    if not word_matches:
+        return []
+
+    try:
+        encoded_text = models.tokenizer(
+            text,
+            truncation=True,
+            max_length=config.bert_max_tokens,
+            return_offsets_mapping=True,
+            return_tensors="pt",
+        )
+    except Exception:
+        return []
+
+    offset_mapping = encoded_text.pop("offset_mapping")[0].tolist()
+    input_ids = encoded_text["input_ids"].to(models.bert_device)
+    attention_mask = encoded_text["attention_mask"].to(models.bert_device)
+    embedding_layer = models.bert_model.get_input_embeddings()
+    input_embeddings = embedding_layer(input_ids).detach()
+    input_embeddings.requires_grad_(True)
+
+    try:
+        with torch.enable_grad():
+            models.bert_model.zero_grad(set_to_none=True)
+            toxic_logit = models.bert_model(
+                inputs_embeds=input_embeddings,
+                attention_mask=attention_mask,
+            ).logits[0, 1]
+            toxic_logit.backward()
+    except Exception:
+        return []
+
+    if input_embeddings.grad is None:
+        return []
+
+    token_scores = (
+        (input_embeddings.grad[0] * input_embeddings[0]).abs().sum(dim=1).detach().cpu()
+    )
+    word_scores: dict[str, WordImpact] = {}
+
+    for token_index, (token_start, token_end) in enumerate(offset_mapping):
+        if token_end <= token_start:
+            continue
+
+        for match in word_matches:
+            overlap_start = max(token_start, match.start())
+            overlap_end = min(token_end, match.end())
+
+            if overlap_start >= overlap_end:
+                continue
+
+            lowercased_word = match.group(0).lower()
+            score = float(token_scores[token_index])
+            existing_impact = word_scores.get(lowercased_word)
+
+            if existing_impact is None:
+                word_scores[lowercased_word] = WordImpact(
+                    word=match.group(0),
+                    probability_drop=score,
+                )
+            else:
+                word_scores[lowercased_word] = WordImpact(
+                    word=existing_impact.word,
+                    probability_drop=existing_impact.probability_drop + score,
+                )
+
+    if not word_scores:
+        return []
+
+    max_score = max(impact.probability_drop for impact in word_scores.values())
+
+    if max_score <= 0:
+        return []
+
+    word_impacts = [
+        impact
+        for impact in word_scores.values()
+        if impact.probability_drop >= max_score * FLAGGED_WORD_MIN_SALIENCY_RATIO
+    ]
+    word_impacts.sort(key=lambda impact: impact.probability_drop, reverse=True)
+    return word_impacts
 
 
 # measure how much one word changes the toxicity score
@@ -413,8 +570,19 @@ def find_flagged_words(
     if base_probability <= config.neutral_probability_threshold:
         return []
 
+    saliency_impacts = calculate_bert_word_saliency(
+        text=text,
+        models=models,
+        config=config,
+    )
+
+    if saliency_impacts:
+        return [impact.word for impact in saliency_impacts[: config.max_flagged_words]]
+
     word_impacts = []
-    for lowercased_word, display_word in unique_words_with_original_spelling(text).items():
+    unique_words = unique_words_with_original_spelling(text)
+
+    for lowercased_word, display_word in unique_words.items():
         probability_drop = calculate_word_impact(
             text=text,
             word=lowercased_word,
