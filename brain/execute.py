@@ -12,8 +12,9 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_ROOT = BASE_DIR / "models"
 WORD_PATTERN = re.compile(r"[A-Za-z']+")
 WHITESPACE_PATTERN = re.compile(r"\s+")
-HTML_SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?>.*?</\1>") #removes script and style tags with their content
-HTML_TAG_PATTERN = re.compile(r"<[^>]+>") #deletes html tags in <>
+HTML_SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?>.*?</\1>") #removes entire <script> and <style> blocks
+HTML_COMMENT_PATTERN = re.compile(r"(?is)<!--.*?-->") #removes html comments only
+ANGLE_BRACKET_PATTERN = re.compile(r"<[^>]*>") #removes empty angle brackets <>, handles edge cases where html tags are not properly closed
 EXIT_COMMANDS = {"exit", "quit"}
 FLAGGED_WORD_MIN_SALIENCY_RATIO = 0.75
 
@@ -110,6 +111,15 @@ DEFAULT_INFERENCE_CONFIG = InferenceConfig(
 )
 
 
+
+def sanitize_input(text: str) -> str:
+    text = text or ""
+    text = HTML_SCRIPT_STYLE_PATTERN.sub(" ", text)
+    text = HTML_COMMENT_PATTERN.sub(" ", text)
+    text = ANGLE_BRACKET_PATTERN.sub(" ", text)
+    text = html.unescape(text)
+    return WHITESPACE_PATTERN.sub(" ", text).strip()
+
 # split text into lowercase word tokens
 def tokenize_words(text: str) -> list[str]:
     return WORD_PATTERN.findall((text or "").lower())
@@ -117,7 +127,7 @@ def tokenize_words(text: str) -> list[str]:
 # remove html tags and unescape entities to get the visible text, basically parse the html into text
 def html_to_text(raw: str) -> str:
     text = HTML_SCRIPT_STYLE_PATTERN.sub(" ", raw or "")
-    text = HTML_TAG_PATTERN.sub(" ", text)
+    # text = HTML_TAG_PATTERN.sub(" ", text) #undefined for now
     text = html.unescape(text)
     return WHITESPACE_PATTERN.sub(" ", text).strip()
 
@@ -661,7 +671,7 @@ def run_interactive_session(
         if should_exit(raw_phrase):
             break
 
-        phrase = html_to_text(raw_phrase) #added html parsing
+        phrase = sanitize_input(raw_phrase) #added html parsing with angle bracket stripping 
 
         if not phrase:
             continue
