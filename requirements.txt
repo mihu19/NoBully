@@ -3,3 +3,7 @@ torch
 tqdm
 transformers
 datasets
+beautifulsoup4
+fastapi
+httpx
+uvicorn
