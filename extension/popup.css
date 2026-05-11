@@ -1,0 +1,187 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, Helvetica, sans-serif;
+  color: #172033;
+  background: #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 360px;
+  margin: 0;
+  background: #f8fafc;
+}
+
+main {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h1,
+h2,
+p,
+dl {
+  margin: 0;
+}
+
+h1 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.status {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
+.status-idle {
+  background: #e8edf4;
+  color: #3f4b60;
+}
+
+.status-ok {
+  background: #dff5e8;
+  color: #17613a;
+}
+
+.status-error {
+  background: #ffe3e3;
+  color: #9f1f1f;
+}
+
+form {
+  display: grid;
+  gap: 12px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #4c5870;
+}
+
+input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #cfd6e3;
+  border-radius: 6px;
+  color: #172033;
+  font: inherit;
+  padding: 8px 10px;
+}
+
+input:focus {
+  border-color: #2762d8;
+  outline: 2px solid rgba(39, 98, 216, 0.18);
+}
+
+input[type="checkbox"] {
+  width: 20px;
+  min-height: 20px;
+  accent-color: #2762d8;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+#saveButton {
+  background: #172033;
+  color: #ffffff;
+}
+
+#saveButton:hover {
+  background: #29344b;
+}
+
+#testButton {
+  background: #e8edf4;
+  color: #172033;
+}
+
+#testButton:hover {
+  background: #dbe3ee;
+}
+
+.result {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #d8dee8;
+  padding-top: 14px;
+}
+
+dl {
+  display: grid;
+  gap: 8px;
+}
+
+dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+dt {
+  color: #5d687f;
+}
+
+dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+#lastUrl {
+  overflow: hidden;
+  color: #5d687f;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
