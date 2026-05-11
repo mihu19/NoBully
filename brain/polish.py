@@ -9,7 +9,10 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
-import execute
+if __package__:
+    from . import execute
+else:
+    import execute
 
 
 BASE_DIR = Path(__file__).resolve().parent
