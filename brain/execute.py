@@ -7,6 +7,11 @@ from typing import Any
 from torch import nn
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+try:
+    from bs4 import BeautifulSoup
+except ImportError:  # pragma: no cover - fallback keeps the CLI usable without bs4.
+    BeautifulSoup = None
+
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_ROOT = BASE_DIR / "models"
@@ -17,6 +22,65 @@ HTML_COMMENT_PATTERN = re.compile(r"(?is)<!--.*?-->") #removes html comments onl
 ANGLE_BRACKET_PATTERN = re.compile(r"<[^>]*>") #removes empty angle brackets <>, handles edge cases where html tags are not properly closed
 EXIT_COMMANDS = {"exit", "quit"}
 FLAGGED_WORD_MIN_SALIENCY_RATIO = 0.75
+MODEL_NEGATIVE_WORD_STOP_WORDS = {
+    "a",
+    "about",
+    "all",
+    "am",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "been",
+    "being",
+    "but",
+    "by",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "had",
+    "has",
+    "have",
+    "he",
+    "her",
+    "his",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "no",
+    "of",
+    "on",
+    "or",
+    "our",
+    "she",
+    "than",
+    "that",
+    "the",
+    "their",
+    "them",
+    "then",
+    "these",
+    "they",
+    "this",
+    "those",
+    "to",
+    "us",
+    "was",
+    "we",
+    "were",
+    "with",
+    "you",
+    "your",
+    "yours",
+}
 
 
 @dataclass(frozen=True)
@@ -32,7 +96,7 @@ class SeverityBand:
     severity_percent: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) # holds all the settings related to model inference and how probabilities are combined and interpreted
 class InferenceConfig:
     bert_max_tokens: int
     lstm_padding_token_id: int
@@ -51,7 +115,22 @@ class InferenceConfig:
 
 
 @dataclass(frozen=True)
-class LoadedModels:
+class PageSafetyConfig: # holds all the settings related to page analysis and blocking decisions
+    max_text_characters: int
+    page_chunk_word_count: int
+    max_page_chunks: int
+    severity_threshold_percent: int
+    negative_word_threshold: int
+    max_returned_negative_words: int
+    model_negative_word_min_probability: float
+    model_negative_word_min_probability_drop: float
+    model_negative_word_min_saliency_ratio: float
+    model_negative_word_candidate_limit: int
+    max_negative_word_saliency_chunks: int
+
+
+@dataclass(frozen=True) # holds all the loaded models and related info needed for analysis
+class LoadedModels: 
     tokenizer: Any
     bert_model: Any
     bert_device: torch.device
@@ -64,11 +143,29 @@ class LoadedModels:
     polish_device: torch.device
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) # holds the results of analyzing a single phrase, used for both CLI and page analysis
 class PhraseAnalysis:
     severity_percent: int
     toxicity_percent: int
     flagged_words: list[str]
+
+
+@dataclass(frozen=True) # holds the results of analyzing a page snapshot, including the final block decision and details about the analysis
+class PageSafetyAnalysis:
+    blocked: bool
+    block_reasons: list[str]
+    severity_percent: int
+    toxicity_percent: int
+    flagged_words: list[str]
+    negative_word_count: int
+    negative_word_matches: list[str]
+    blur_words: list[str]
+    threshold_percent: int
+    negative_word_threshold: int
+    analyzed_character_count: int
+    analyzed_word_count: int
+    chunks_analyzed: int
+    message: str
 
 
 @dataclass(frozen=True)
@@ -83,7 +180,7 @@ DEFAULT_MODEL_PATHS = ModelPaths(
     polish_checkpoint=MODEL_ROOT / "polish_layer.pt",
 )
 
-DEFAULT_INFERENCE_CONFIG = InferenceConfig(
+DEFAULT_INFERENCE_CONFIG = InferenceConfig( #matches the training setup in train.py
     bert_max_tokens=160,
     lstm_padding_token_id=0,
     lstm_unknown_token_id=1,
@@ -110,6 +207,20 @@ DEFAULT_INFERENCE_CONFIG = InferenceConfig(
     ),
 )
 
+DEFAULT_PAGE_SAFETY_CONFIG = PageSafetyConfig( # holds all the settings related to page analysis and blocking decisions, can be adjusted independently from the main model inference config
+    max_text_characters=50000,
+    page_chunk_word_count=120,
+    max_page_chunks=32,
+    severity_threshold_percent=65,
+    negative_word_threshold=30,
+    max_returned_negative_words=200,
+    model_negative_word_min_probability=0.45,
+    model_negative_word_min_probability_drop=0.03,
+    model_negative_word_min_saliency_ratio=0.45,
+    model_negative_word_candidate_limit=120,
+    max_negative_word_saliency_chunks=8,
+)
+
 
 
 def sanitize_input(text: str) -> str:
@@ -126,10 +237,53 @@ def tokenize_words(text: str) -> list[str]:
 
 # remove html tags and unescape entities to get the visible text, basically parse the html into text
 def html_to_text(raw: str) -> str:
-    text = HTML_SCRIPT_STYLE_PATTERN.sub(" ", raw or "")
-    # text = HTML_TAG_PATTERN.sub(" ", text) #undefined for now
+    raw = raw or ""
+
+    if BeautifulSoup is not None:
+        soup = BeautifulSoup(raw, "html.parser")
+
+        for tag in soup(["script", "style", "noscript", "template", "svg", "canvas"]):
+            tag.decompose()
+
+        return WHITESPACE_PATTERN.sub(" ", soup.get_text(" ")).strip()
+
+    text = HTML_SCRIPT_STYLE_PATTERN.sub(" ", raw)
+    text = HTML_COMMENT_PATTERN.sub(" ", text)
+    text = ANGLE_BRACKET_PATTERN.sub(" ", text)
     text = html.unescape(text)
     return WHITESPACE_PATTERN.sub(" ", text).strip()
+
+
+# turn a browser snapshot into compact visible text for the model
+def prepare_page_text(
+    html_snapshot: str | None = None,
+    text_snapshot: str | None = None,
+    config: PageSafetyConfig = DEFAULT_PAGE_SAFETY_CONFIG,
+) -> str:
+    if text_snapshot and text_snapshot.strip():
+        text = sanitize_input(text_snapshot)
+    else:
+        text = html_to_text(html_snapshot or "")
+
+    return text[: config.max_text_characters].strip()
+
+
+# split a long page into model-sized chunks so toxic content later in the page is not missed
+def split_text_for_page_analysis(
+    text: str,
+    config: PageSafetyConfig = DEFAULT_PAGE_SAFETY_CONFIG,
+) -> list[str]:
+    words = WORD_PATTERN.findall(text or "")
+
+    if not words:
+        return []
+
+    chunks = [
+        " ".join(words[start : start + config.page_chunk_word_count])
+        for start in range(0, len(words), config.page_chunk_word_count)
+    ]
+    return chunks[: config.max_page_chunks]
+
 
 # convert text into padded token ids for the lstm model
 def encode_text_for_lstm(
@@ -281,7 +435,10 @@ def load_polish_model(paths: ModelPaths) -> tuple[Any | None, tuple[str, ...], t
         return None, (), device
 
     try:
-        from polish import load_polish_layer
+        try:
+            from .polish import load_polish_layer
+        except ImportError:
+            from polish import load_polish_layer
 
         polish_layer, feature_names = load_polish_layer(
             path=paths.polish_checkpoint,
@@ -346,6 +503,34 @@ def predict_bert_probability(
     return float(probability)
 
 
+def predict_bert_probabilities(
+    texts: list[str],
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> list[float]:
+    if not texts:
+        return []
+
+    encoded_text = models.tokenizer(
+        texts,
+        truncation=True,
+        padding="max_length",
+        max_length=config.bert_max_tokens,
+        return_tensors="pt",
+    )
+    input_ids = encoded_text["input_ids"].to(models.bert_device)
+    attention_mask = encoded_text["attention_mask"].to(models.bert_device)
+
+    with torch.no_grad():
+        logits = models.bert_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        ).logits
+        probabilities = torch.softmax(logits, dim=1)[:, 1].detach().cpu().tolist()
+
+    return [float(probability) for probability in probabilities]
+
+
 # predict the toxic class probability with the lstm model
 def predict_lstm_probability(
     text: str,
@@ -367,6 +552,32 @@ def predict_lstm_probability(
     return float(probability)
 
 
+def predict_lstm_probabilities(
+    texts: list[str],
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> list[float]:
+    if not texts:
+        return []
+
+    encoded_texts = [
+        encode_text_for_lstm(
+            text=text,
+            vocab=models.lstm_vocab,
+            max_tokens=models.lstm_max_tokens,
+            config=config,
+        )
+        for text in texts
+    ]
+    input_tensor = torch.tensor(encoded_texts, dtype=torch.long).to(models.lstm_device)
+
+    with torch.no_grad():
+        logits = models.lstm_model(input_tensor)
+        probabilities = torch.sigmoid(logits).detach().cpu().tolist()
+
+    return [float(probability) for probability in probabilities]
+
+
 # combine bert and lstm probabilities into one score
 def combine_probabilities(
     bert_probability: float,
@@ -377,6 +588,40 @@ def combine_probabilities(
         config.bert_score_weight * bert_probability
         + config.lstm_score_weight * lstm_probability
     )
+
+
+def predict_base_toxicity_probability( #predicts the toxicity probability using just the main models, without the polish layer, used for measuring word impacts on the base model score
+    text: str,
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> float:
+    bert_probability = predict_bert_probability(text, models, config)
+    lstm_probability = predict_lstm_probability(text, models, config)
+    return combine_probabilities(
+        bert_probability=bert_probability,
+        lstm_probability=lstm_probability,
+        config=config,
+    )
+
+
+def predict_base_toxicity_probabilities(
+    texts: list[str],
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> list[float]:
+    bert_probabilities = predict_bert_probabilities(texts, models, config)
+    lstm_probabilities = predict_lstm_probabilities(texts, models, config)
+    return [
+        combine_probabilities(
+            bert_probability=bert_probability,
+            lstm_probability=lstm_probability,
+            config=config,
+        )
+        for bert_probability, lstm_probability in zip(
+            bert_probabilities,
+            lstm_probabilities,
+        )
+    ]
 
 
 # run the optional polish layer over raw main-model probabilities
@@ -391,7 +636,10 @@ def apply_polish_layer(
         return combined_probability
 
     try:
-        from polish import predict_polished_probability
+        try:
+            from .polish import predict_polished_probability
+        except ImportError:
+            from polish import predict_polished_probability
 
         return predict_polished_probability(
             text=text,
@@ -471,8 +719,8 @@ def unique_words_with_original_spelling(text: str) -> dict[str, str]:
     return words
 
 
-# measure which words the BERT model used most for the toxic class
-def calculate_bert_word_saliency(
+# measure which words the BERT model used for the toxic class
+def calculate_all_bert_word_saliency(
     text: str,
     models: LoadedModels,
     config: InferenceConfig,
@@ -548,18 +796,34 @@ def calculate_bert_word_saliency(
     if not word_scores:
         return []
 
-    max_score = max(impact.probability_drop for impact in word_scores.values())
+    word_impacts = list(word_scores.values())
+    word_impacts.sort(key=lambda impact: impact.probability_drop, reverse=True)
+    return word_impacts
+
+
+# measure which words the BERT model used most for the toxic class
+def calculate_bert_word_saliency(
+    text: str,
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> list[WordImpact]:
+    word_impacts = calculate_all_bert_word_saliency(text, models, config)
+
+    if not word_impacts:
+        return []
+
+    max_score = max(impact.probability_drop for impact in word_impacts)
 
     if max_score <= 0:
         return []
 
-    word_impacts = [
+    filtered_impacts = [
         impact
-        for impact in word_scores.values()
+        for impact in word_impacts
         if impact.probability_drop >= max_score * FLAGGED_WORD_MIN_SALIENCY_RATIO
     ]
-    word_impacts.sort(key=lambda impact: impact.probability_drop, reverse=True)
-    return word_impacts
+    filtered_impacts.sort(key=lambda impact: impact.probability_drop, reverse=True)
+    return filtered_impacts
 
 
 # measure how much one word changes the toxicity score
@@ -572,6 +836,22 @@ def calculate_word_impact(
 ) -> float:
     text_without_word = remove_word_occurrences(text, word)
     probability_without_word = predict_toxicity_probability(
+        text_without_word,
+        models,
+        config,
+    )
+    return base_probability - probability_without_word
+
+
+def calculate_base_model_word_impact(
+    text: str,
+    word: str,
+    base_probability: float,
+    models: LoadedModels,
+    config: InferenceConfig,
+) -> float:
+    text_without_word = remove_word_occurrences(text, word)
+    probability_without_word = predict_base_toxicity_probability(
         text_without_word,
         models,
         config,
@@ -635,6 +915,202 @@ def analyze_phrase(
             models=models,
             config=config,
         ),
+    )
+
+
+def collect_word_occurrences(text: str, lowercased_word: str) -> list[str]:
+    return [
+        match.group(0)
+        for match in WORD_PATTERN.finditer(text)
+        if match.group(0).lower() == lowercased_word
+    ]
+
+
+def find_model_negative_words_for_chunk(
+    chunk: str,
+    base_probability: float,
+    models: LoadedModels,
+    inference_config: InferenceConfig,
+    safety_config: PageSafetyConfig,
+) -> list[str]:
+    if base_probability < safety_config.model_negative_word_min_probability:
+        return []
+
+    saliency_impacts = calculate_all_bert_word_saliency(
+        text=chunk,
+        models=models,
+        config=inference_config,
+    )
+
+    if saliency_impacts:
+        max_saliency = max(impact.probability_drop for impact in saliency_impacts)
+        saliency_cutoff = max_saliency * safety_config.model_negative_word_min_saliency_ratio
+        negative_words = []
+
+        for impact in saliency_impacts[: safety_config.model_negative_word_candidate_limit]:
+            if impact.probability_drop < saliency_cutoff:
+                continue
+
+            if len(impact.word.strip("'")) < 3:
+                continue
+
+            lowercased_word = impact.word.lower()
+
+            if lowercased_word in MODEL_NEGATIVE_WORD_STOP_WORDS:
+                continue
+
+            negative_words.extend(collect_word_occurrences(chunk, lowercased_word))
+
+        return negative_words
+
+    negative_words: list[str] = []
+    unique_words = list(unique_words_with_original_spelling(chunk).items())
+    candidates = unique_words[: safety_config.model_negative_word_candidate_limit]
+
+    for lowercased_word, _display_word in candidates:
+        if len(lowercased_word.strip("'")) < 2:
+            continue
+
+        if lowercased_word in MODEL_NEGATIVE_WORD_STOP_WORDS:
+            continue
+
+        probability_drop = calculate_base_model_word_impact(
+            text=chunk,
+            word=lowercased_word,
+            base_probability=base_probability,
+            models=models,
+            config=inference_config,
+        )
+
+        if probability_drop >= safety_config.model_negative_word_min_probability_drop:
+            negative_words.extend(collect_word_occurrences(chunk, lowercased_word))
+
+    return negative_words
+
+
+def summarize_model_negative_words(
+    chunk_probabilities: list[tuple[str, float]],
+    models: LoadedModels,
+    inference_config: InferenceConfig,
+    safety_config: PageSafetyConfig,
+) -> tuple[int, list[str]]:
+    matches: list[str] = []
+    toxic_chunk_probabilities = [
+        (chunk, probability)
+        for chunk, probability in chunk_probabilities
+        if probability >= safety_config.model_negative_word_min_probability
+    ]
+    toxic_chunk_probabilities.sort(key=lambda item: item[1], reverse=True)
+
+    for chunk, probability in toxic_chunk_probabilities[
+        : safety_config.max_negative_word_saliency_chunks
+    ]:
+        matches.extend(
+            find_model_negative_words_for_chunk(
+                chunk=chunk,
+                base_probability=probability,
+                models=models,
+                inference_config=inference_config,
+                safety_config=safety_config,
+            )
+        )
+
+    unique_matches = sorted(set(matches))[: safety_config.max_returned_negative_words]
+    return len(matches), unique_matches
+
+
+# analyze a browser page snapshot and decide whether it should be blocked
+def analyze_page_snapshot(
+    html_snapshot: str | None,
+    text_snapshot: str | None,
+    models: LoadedModels,
+    inference_config: InferenceConfig = DEFAULT_INFERENCE_CONFIG,
+    safety_config: PageSafetyConfig = DEFAULT_PAGE_SAFETY_CONFIG,
+) -> PageSafetyAnalysis:
+    page_text = prepare_page_text(
+        html_snapshot=html_snapshot,
+        text_snapshot=text_snapshot,
+        config=safety_config,
+    )
+    page_words = tokenize_words(page_text)
+    chunks = split_text_for_page_analysis(page_text, safety_config)
+
+    if not chunks:
+        return PageSafetyAnalysis(
+            blocked=False,
+            block_reasons=[],
+            severity_percent=0,
+            toxicity_percent=0,
+            flagged_words=[],
+            negative_word_count=0,
+            negative_word_matches=[],
+            blur_words=[],
+            threshold_percent=safety_config.severity_threshold_percent,
+            negative_word_threshold=safety_config.negative_word_threshold,
+            analyzed_character_count=0,
+            analyzed_word_count=0,
+            chunks_analyzed=0,
+            message="No readable page text was found.",
+        )
+
+    highest_probability = 0.0
+    highest_probability_chunk = chunks[0]
+    toxicity_probabilities = predict_base_toxicity_probabilities(
+        chunks,
+        models,
+        inference_config,
+    )
+    chunk_probabilities = list(zip(chunks, toxicity_probabilities))
+
+    if chunk_probabilities:
+        highest_probability_chunk, highest_probability = max(
+            chunk_probabilities,
+            key=lambda item: item[1],
+        )
+
+    severity_percent = calculate_severity_percent(
+        highest_probability,
+        inference_config,
+    )
+    toxicity_percent = probability_to_percent(highest_probability)
+    negative_word_count, negative_word_matches = summarize_model_negative_words(
+        chunk_probabilities=chunk_probabilities,
+        models=models,
+        inference_config=inference_config,
+        safety_config=safety_config,
+    )
+    flagged_words = negative_word_matches[: inference_config.max_flagged_words]
+    block_reasons = []
+
+    # Block only based on severity percentage (map from model probability).
+    if severity_percent >= safety_config.severity_threshold_percent:
+        block_reasons.append("severity_threshold")
+
+    blocked = bool(block_reasons)
+
+    if "severity_threshold" in block_reasons:
+        message = (
+            "This page was blocked because its severity exceeded the configured "
+            "threshold."
+        )
+    else:
+        message = "This page was allowed."
+
+    return PageSafetyAnalysis(
+        blocked=blocked,
+        block_reasons=block_reasons,
+        severity_percent=severity_percent,
+        toxicity_percent=toxicity_percent,
+        flagged_words=flagged_words,
+        negative_word_count=negative_word_count,
+        negative_word_matches=negative_word_matches,
+        blur_words=negative_word_matches,
+        threshold_percent=safety_config.severity_threshold_percent,
+        negative_word_threshold=safety_config.negative_word_threshold,
+        analyzed_character_count=len(page_text),
+        analyzed_word_count=len(page_words),
+        chunks_analyzed=len(chunks),
+        message=message,
     )
 
 
