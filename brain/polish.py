@@ -187,6 +187,7 @@ class PolishExample:
 
 
 class PolishLayer(nn.Module):
+    # initializes the polish layer
     def __init__(self, feature_count: int, hidden_size: int = 16) -> None:
         super().__init__()
         self.network = nn.Sequential(
@@ -195,23 +196,28 @@ class PolishLayer(nn.Module):
             nn.Linear(hidden_size, 1),
         )
 
+    # runs the polish layer forward pass
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.network(features).squeeze(1)
 
 
+# tokenizes text into lowercase words
 def tokenize_words(text: str) -> list[str]:
     return WORD_PATTERN.findall((text or "").lower())
 
 
+# clamps a probability between zero and one
 def clamp_probability(probability: float) -> float:
     return max(0.0, min(1.0, float(probability)))
 
 
+# counts vocabulary matches with a cap
 def capped_count(words: list[str], vocabulary: set[str], cap: int = 4) -> float:
     count = sum(1 for word in words if word in vocabulary)
     return min(count, cap) / cap
 
 
+# checks for second person directed profanity
 def has_directed_profanity(words: list[str]) -> bool:
     return any(
         word in PROFANITY_WORDS
@@ -221,12 +227,14 @@ def has_directed_profanity(words: list[str]) -> bool:
     )
 
 
+# checks whether profanity appears in positive context
 def has_positive_profanity(words: list[str]) -> bool:
     return any(word in PROFANITY_WORDS for word in words) and any(
         word in POSITIVE_CONTEXT_WORDS for word in words
     )
 
 
+# limits directed insult probabilities
 def directed_insult_cap(words: list[str]) -> float | None:
     if not any(word in SECOND_PERSON_WORDS for word in words):
         return None
@@ -245,6 +253,7 @@ def directed_insult_cap(words: list[str]) -> float | None:
     return min(0.85, max(insult_scores) + repeated_insult_boost + profanity_boost)
 
 
+# builds named polish features for one prediction
 def build_polish_feature_map(
     text: str,
     bert_probability: float,
@@ -276,6 +285,7 @@ def build_polish_feature_map(
     }
 
 
+# builds ordered polish feature values
 def build_polish_features(
     text: str,
     bert_probability: float,
@@ -292,6 +302,7 @@ def build_polish_features(
     return [feature_map[name] for name in feature_names]
 
 
+# reads a float value from a dataframe row
 def row_float(row: pd.Series, column: str, default: float = 0.0) -> float:
     value = row.get(column, default)
 
@@ -304,6 +315,7 @@ def row_float(row: pd.Series, column: str, default: float = 0.0) -> float:
         return default
 
 
+# loads examples that should reduce false positives
 def load_false_positive_examples(path: Path = POLISH_DATA_PATH) -> list[PolishExample]:
     if not path.exists():
         raise FileNotFoundError(f"Polish data file not found: {path}")
@@ -317,6 +329,7 @@ def load_false_positive_examples(path: Path = POLISH_DATA_PATH) -> list[PolishEx
         raise RuntimeError(f"Polish data file has no comment_text column: {path}")
 
     examples = []
+
     for _, row in frame.dropna(subset=["comment_text"]).iterrows():
         target_probability = row_float(row, "target_toxicity", default=0.05)
         category = str(row.get("category", ""))
@@ -338,6 +351,7 @@ def load_false_positive_examples(path: Path = POLISH_DATA_PATH) -> list[PolishEx
     return examples
 
 
+# checks whether a row is a toxic anchor
 def row_is_positive_anchor(row: pd.Series) -> bool:
     for column in ("toxic", "threat", "insult", "harassment", "identity_attack"):
         if row_float(row, column) > 0:
@@ -346,6 +360,7 @@ def row_is_positive_anchor(row: pd.Series) -> bool:
     return False
 
 
+# chooses a target probability for a positive row
 def positive_target_for_row(row: pd.Series) -> float:
     severity = row_float(row, "severity", default=-1.0)
 
@@ -364,6 +379,7 @@ def positive_target_for_row(row: pd.Series) -> float:
     return 0.85
 
 
+# loads positive anchors from curated data
 def load_curated_positive_anchors() -> list[PolishExample]:
     examples = []
 
@@ -372,6 +388,7 @@ def load_curated_positive_anchors() -> list[PolishExample]:
             continue
 
         frame = pd.read_csv(csv_file)
+
         if "comment_text" not in frame.columns and "text" in frame.columns:
             frame = frame.rename(columns={"text": "comment_text"})
 
@@ -393,6 +410,7 @@ def load_curated_positive_anchors() -> list[PolishExample]:
     return examples
 
 
+# creates synthetic positive anchor examples
 def generate_positive_anchor_examples() -> list[PolishExample]:
     insults = ("stupid", "idiot", "loser", "worthless", "donkey", "moron")
     threats = (
@@ -418,6 +436,7 @@ def generate_positive_anchor_examples() -> list[PolishExample]:
     return examples
 
 
+# loads all examples for polish training
 def load_polish_examples() -> list[PolishExample]:
     return (
         load_false_positive_examples()
@@ -426,6 +445,7 @@ def load_polish_examples() -> list[PolishExample]:
     )
 
 
+# predicts raw probabilities from base models
 def predict_raw_model_probabilities(
     text: str,
     models: execute.LoadedModels,
@@ -441,6 +461,7 @@ def predict_raw_model_probabilities(
     return bert_probability, lstm_probability, combined_probability
 
 
+# builds tensors for polish layer training
 def build_training_tensors(
     examples: list[PolishExample],
     models: execute.LoadedModels,
@@ -474,6 +495,7 @@ def build_training_tensors(
     )
 
 
+# trains and saves the polish layer
 def train_polish_layer(
     models: execute.LoadedModels | None = None,
     config: execute.InferenceConfig = execute.DEFAULT_INFERENCE_CONFIG,
@@ -503,6 +525,7 @@ def train_polish_layer(
     criterion = nn.MSELoss(reduction="none")
 
     layer.train()
+
     for epoch in range(1, epochs + 1):
         total_loss = 0.0
 
@@ -535,6 +558,7 @@ def train_polish_layer(
     return output_path
 
 
+# loads the saved polish layer
 def load_polish_layer(
     path: Path = POLISH_LAYER_PATH,
     device: torch.device | None = None,
@@ -552,6 +576,7 @@ def load_polish_layer(
     return layer, feature_names
 
 
+# predicts the final polished probability
 def predict_polished_probability(
     text: str,
     bert_probability: float,
@@ -605,6 +630,7 @@ def predict_polished_probability(
     return clamp_probability(probability)
 
 
+# trains the polish layer from the command line
 def main() -> None:
     train_polish_layer()
 
