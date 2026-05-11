@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "NoBully - Content Safety Filter",
+  "version": "1.0.0",
+  "description": "Protects users from toxic web content by analyzing pages in real-time",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "NoBully Content Filter"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
