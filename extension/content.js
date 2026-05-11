@@ -757,7 +757,6 @@
     stats.className = "stats";
 
     addStat(stats, "Severity", `${result.severity_percent || 0}%`);
-    addStat(stats, "Toxicity", `${result.toxicity_percent || 0}%`);
     addStat(
       stats,
       "Negative words",
