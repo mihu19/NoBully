@@ -69,7 +69,7 @@ Copy the generated public URL (e.g. `https://xxxx.ngrok.io`) — you'll need it 
 2. In the extension UI, paste your API URL into the input field:
    - Local: `http://127.0.0.1:8000/analyze`
    - ngrok: `https://xxxx.ngrok.io/analyze`
-3. Save and enjoy being protected 🛡️
+3. Save
 
 
 ## Tech Stack
