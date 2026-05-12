@@ -3,14 +3,24 @@
 let allHistory = [];
 let currentFilter = 'all';
 let lastSeenHistoryKey = '';
+const HISTORY_API = '/moderator/api/history?limit=500';
+const CLEAR_API = '/moderator/api/history';
+
+function getFlagCount(entry) {
+  return entry.negative_word_count ?? entry.bad_word_count ?? 0;
+}
+
+function isBlocked(entry) {
+  return Boolean(entry.blocked ?? entry.should_block ?? ((entry.toxicity_percent || 0) >= 65));
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getStatus(entry) {
-  if (entry.should_block || entry.toxicity_percent >= 65) {
+  if (isBlocked(entry)) {
     return { label: 'BLOCKED', color: '#ff3355', filter: 'blocked' };
   }
-  if (entry.toxicity_percent >= 35) {
+  if ((entry.toxicity_percent || 0) >= 35) {
     return { label: 'CAUTION', color: '#ffb020', filter: 'caution' };
   }
   return { label: 'SAFE', color: '#00e87a', filter: 'safe' };
@@ -53,13 +63,13 @@ function showToast(msg, duration = 2500) {
 function historyKey(history) {
   return history
     .slice(-10)
-    .map(entry => `${entry.url || ''}|${entry.timestamp || ''}|${entry.bad_word_count || 0}|${entry.toxicity_percent || 0}`)
+    .map(entry => `${entry.url || ''}|${entry.timestamp || ''}|${getFlagCount(entry)}|${entry.toxicity_percent || 0}`)
     .join('~');
 }
 
 function detectNewBlockedEntry(previousHistory, nextHistory) {
-  const previousKeys = new Set(previousHistory.map(entry => `${entry.url || ''}|${entry.timestamp || ''}|${entry.bad_word_count || 0}|${entry.toxicity_percent || 0}`));
-  const newEntries = nextHistory.filter(entry => !previousKeys.has(`${entry.url || ''}|${entry.timestamp || ''}|${entry.bad_word_count || 0}|${entry.toxicity_percent || 0}`));
+  const previousKeys = new Set(previousHistory.map(entry => `${entry.url || ''}|${entry.timestamp || ''}|${getFlagCount(entry)}|${entry.toxicity_percent || 0}`));
+const newEntries = nextHistory.filter(entry => !previousKeys.has(`${entry.url || ''}|${entry.timestamp || ''}|${getFlagCount(entry)}|${entry.toxicity_percent || 0}`));
   return [...newEntries].reverse().find(entry => getStatus(entry).filter === 'blocked') || null;
 }
 
@@ -69,7 +79,7 @@ function renderStats(history) {
   const total = history.length;
   const blocked = history.filter(h => getStatus(h).filter === 'blocked').length;
   const safe = history.filter(h => getStatus(h).filter === 'safe').length;
-  const flaggedWords = history.reduce((sum, h) => sum + (h.bad_word_count || 0), 0);
+  const flaggedWords = history.reduce((sum, h) => sum + getFlagCount(h), 0);
   const avgTox = total
     ? Math.round(history.reduce((sum, h) => sum + (h.toxicity_percent || 0), 0) / total)
     : 0;
@@ -206,14 +216,14 @@ document.querySelectorAll('.filter-chip').forEach(btn => {
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 
-document.getElementById('clearAllBtn').addEventListener('click', () => {
+document.getElementById('clearAllBtn').addEventListener('click', async () => {
   if (!confirm('Clear all analysis history? This cannot be undone.')) return;
-  chrome.storage.local.set({ analysisHistory: [] }, () => {
-    allHistory = [];
-    renderStats([]);
-    buildTable([]);
-    showToast('History cleared.');
-  });
+  await fetch(CLEAR_API, { method: 'DELETE' });
+  allHistory = [];
+  renderStats([]);
+  renderAlerts([]);
+  buildTable([]);
+  showToast('History cleared.');
 });
 
 document.getElementById('exportBtn').addEventListener('click', () => {
@@ -244,7 +254,7 @@ function renderAlerts(history) {
           <div class="alert-dot"></div>
           <div>
             <div class="alert-url">${escHtml(host)}</div>
-            <div class="alert-meta">${formatTime(entry.timestamp)} &mdash; ${entry.bad_word_count || 0} flagged words</div>
+            <div class="alert-meta">${formatTime(entry.timestamp)} &mdash; ${getFlagCount(entry)} flagged words</div>
           </div>
         </div>
         <span class="alert-badge">Toxicity ${entry.toxicity_percent || 0}%</span>
@@ -254,10 +264,13 @@ function renderAlerts(history) {
 
 // ── Load ──────────────────────────────────────────────────────────────────────
 
-function loadData() {
-  chrome.storage.local.get('analysisHistory', (result) => {
+async function loadData() {
+  try {
     const previousHistory = allHistory;
-    allHistory = result.analysisHistory || [];
+    const res = await fetch(HISTORY_API, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    allHistory = await res.json();
+
     renderStats(allHistory);
     renderAlerts(allHistory);
     buildTable(allHistory);
@@ -271,15 +284,12 @@ function loadData() {
       }
       lastSeenHistoryKey = key;
     }
-  });
+  } catch {
+    showToast('Dashboard cannot reach backend API.');
+  }
 }
 
 loadData();
 
 // Live refresh every 5 seconds in case content.js sends new data
 setInterval(loadData, 5000);
-
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== 'local' || !changes.analysisHistory) return;
-  loadData();
-});

@@ -429,7 +429,7 @@
 
 <nav>
   <div class="nav-logo">
-    <img src="icons/icon32.png" alt="NoBully" />
+    <img src="/modpage/icons/icon32.png" alt="NoBully" />
     <div class="nav-title">No<span>Bully</span></div>
     <span class="nav-badge">Moderation Dashboard</span>
   </div>
@@ -465,6 +465,11 @@
       <div class="stat-label">Avg Toxicity</div>
       <div class="stat-value amber" id="statAvgTox">0%</div>
       <div class="stat-sub">across all scans</div>
+    </div>
+    <div class="stat-card">
+     <div class="stat-label">Flagged Words</div>
+      <div class="stat-value red" id="statFlaggedWords">0</div>
+      <div class="stat-sub" id="statFlaggedWordsSub">0 total matches</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Safe Pages</div>
@@ -504,6 +509,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="dashboard.js"></script>
+<script src="/modpage/dashboard.js"></script>
 </body>
 </html>
