@@ -2,6 +2,7 @@
 
 let allHistory = [];
 let currentFilter = 'all';
+let lastSeenHistoryKey = '';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,12 +50,26 @@ function showToast(msg, duration = 2500) {
   setTimeout(() => el.classList.remove('show'), duration);
 }
 
+function historyKey(history) {
+  return history
+    .slice(-10)
+    .map(entry => `${entry.url || ''}|${entry.timestamp || ''}|${entry.bad_word_count || 0}|${entry.toxicity_percent || 0}`)
+    .join('~');
+}
+
+function detectNewBlockedEntry(previousHistory, nextHistory) {
+  const previousKeys = new Set(previousHistory.map(entry => `${entry.url || ''}|${entry.timestamp || ''}|${entry.bad_word_count || 0}|${entry.toxicity_percent || 0}`));
+  const newEntries = nextHistory.filter(entry => !previousKeys.has(`${entry.url || ''}|${entry.timestamp || ''}|${entry.bad_word_count || 0}|${entry.toxicity_percent || 0}`));
+  return [...newEntries].reverse().find(entry => getStatus(entry).filter === 'blocked') || null;
+}
+
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
 function renderStats(history) {
   const total = history.length;
   const blocked = history.filter(h => getStatus(h).filter === 'blocked').length;
   const safe = history.filter(h => getStatus(h).filter === 'safe').length;
+  const flaggedWords = history.reduce((sum, h) => sum + (h.bad_word_count || 0), 0);
   const avgTox = total
     ? Math.round(history.reduce((sum, h) => sum + (h.toxicity_percent || 0), 0) / total)
     : 0;
@@ -65,6 +80,9 @@ function renderStats(history) {
   document.getElementById('statBlockedPct').textContent =
     total ? `${Math.round((blocked / total) * 100)}% block rate` : '0% block rate';
   document.getElementById('statAvgTox').textContent = avgTox + '%';
+  document.getElementById('statFlaggedWords').textContent = flaggedWords;
+  document.getElementById('statFlaggedWordsSub').textContent =
+    total ? `${Math.round(flaggedWords / total)} avg per scan` : '0 total matches';
   document.getElementById('statSafe').textContent = safe;
   document.getElementById('statSafePct').textContent =
     total ? `${Math.round((safe / total) * 100)}% safe rate` : '0% safe rate';
@@ -238,10 +256,21 @@ function renderAlerts(history) {
 
 function loadData() {
   chrome.storage.local.get('analysisHistory', (result) => {
+    const previousHistory = allHistory;
     allHistory = result.analysisHistory || [];
     renderStats(allHistory);
     renderAlerts(allHistory);
     buildTable(allHistory);
+
+    const key = historyKey(allHistory);
+    if (key !== lastSeenHistoryKey) {
+      const newBlocked = detectNewBlockedEntry(previousHistory, allHistory);
+      if (newBlocked) {
+        const { host } = formatUrl(newBlocked.url);
+        showToast(`Blocked page detected: ${host}`);
+      }
+      lastSeenHistoryKey = key;
+    }
   });
 }
 
@@ -249,3 +278,8 @@ loadData();
 
 // Live refresh every 5 seconds in case content.js sends new data
 setInterval(loadData, 5000);
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes.analysisHistory) return;
+  loadData();
+});
