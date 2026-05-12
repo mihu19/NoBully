@@ -3,10 +3,14 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 
+
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from pathlib import Path
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 if __package__:
     from .execute import (
@@ -33,6 +37,11 @@ else:
         predict_base_toxicity_probability,
     )
 
+BASE_DIR = Path(__file__).resolve().parents[1]  # backend\
+MODPAGE_DIR = BASE_DIR / "modpage"
+
+MAX_EVENTS = 500
+MODERATION_EVENTS: list[dict] = []
 
 MODERATOR_WARNING_URL_ENV = "MODERATOR_WARNING_URL"
 
@@ -50,6 +59,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+if MODPAGE_DIR.exists():
+    app.mount("/modpage", StaticFiles(directory=str(MODPAGE_DIR)), name="modpage")
 
 @app.middleware("http")
 async def add_local_extension_headers(request, call_next):
@@ -134,7 +145,7 @@ def build_safety_config(request: AnalyzeRequest) -> PageSafetyConfig:
     return replace(DEFAULT_PAGE_SAFETY_CONFIG, **overrides)
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=512) # Cache results for repeated text inputs to speed up analysis of the same content
 def analyze_text_snapshot_cached(
     text: str,
     severity_threshold_percent: int,
@@ -166,7 +177,7 @@ async def send_moderator_warning(
     if not moderator_url:
         return False, None
 
-    payload = {
+    payload = { 
         "url": request.url,
         "title": request.title,
         "blocked": analysis.blocked,
@@ -195,8 +206,40 @@ async def send_moderator_warning(
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
+@app.get("/dashboard") # This serves the moderation dashboard HTML page
+def dashboard() -> FileResponse:
+    file_path = MODPAGE_DIR / "dashboard.html"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="dashboard.html not found")
+    return FileResponse(file_path)
 
-@app.post("/analyze", response_model=AnalyzeResponse)
+@app.get("/moderator/api/history") # Returns recent moderation events for the dashboard
+def moderator_history(limit: int = 300) -> list[dict]:
+    safe_limit = max(1, min(limit, MAX_EVENTS))
+    return MODERATION_EVENTS[-safe_limit:]
+
+@app.get("/moderator/api/stats") # Returns aggregated stats for the moderator dashboard
+def moderator_stats() -> dict:
+    history = MODERATION_EVENTS
+    total = len(history)
+    blocked = sum(1 for e in history if e.get("blocked"))
+    safe = sum(1 for e in history if not e.get("blocked"))
+    flagged_total = sum(int(e.get("negative_word_count") or 0) for e in history)
+    avg_toxicity = round(sum(int(e.get("toxicity_percent") or 0) for e in history) / total) if total else 0
+    return {
+        "total": total,
+        "blocked": blocked,
+        "safe": safe,
+        "flagged_total": flagged_total,
+        "avg_toxicity": avg_toxicity,
+    }
+
+@app.delete("/moderator/api/history") # Endpoint to clear moderation history (for testing/demo purposes)
+def moderator_clear_history() -> dict[str, bool]:
+    MODERATION_EVENTS.clear()
+    return {"ok": True}
+
+@app.post("/analyze", response_model=AnalyzeResponse) # Main endpoint to analyze page snapshots
 async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     if not (request.html and request.html.strip()) and not (
         request.text and request.text.strip()
@@ -236,6 +279,22 @@ async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
 
     if analysis.blocked:
         warning_sent, warning_error = await send_moderator_warning(request, analysis)
+
+    event = { # Log moderation event for dashboard
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "url": request.url or "",
+        "title": request.title or "",
+        "blocked": bool(analysis.blocked),
+        "toxicity_percent": int(analysis.toxicity_percent or 0),
+        "severity_percent": int(analysis.severity_percent or 0),
+        "negative_word_count": int(analysis.negative_word_count or 0),
+        "flagged_words": list(analysis.flagged_words or []),
+        "message": analysis.message,
+    }
+    MODERATION_EVENTS.append(event)
+
+    if len(MODERATION_EVENTS) > MAX_EVENTS:
+        del MODERATION_EVENTS[:-MAX_EVENTS]
 
     response_data = asdict(analysis)
     response_data["moderator_warning_sent"] = warning_sent
