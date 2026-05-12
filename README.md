@@ -18,6 +18,12 @@ The project has three main parts:
 6. The extension blurs matched harmful words or replaces the page with a block screen.
 7. The backend stores recent moderation events in memory for the dashboard.
 
+## Examples
+<img width="1919" height="1025" alt="3" src="https://github.com/user-attachments/assets/17fe990a-77cd-49ac-9b72-2eb2df0925b2" />
+<img width="888" height="483" alt="2" src="https://github.com/user-attachments/assets/1a6057d3-03b5-4cab-a84a-561ddd125f64" />
+<img width="356" height="462" alt="1" src="https://github.com/user-attachments/assets/930a14e6-1b7a-4327-9625-8ef646b481d9" />
+
+
 ## Architecture
 
 ```text
