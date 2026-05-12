@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Bully Page Safety Filter",
+  "version": "1.0.0",
+  "description": "Checks page snapshots with the local toxicity API and blocks pages that exceed your thresholds.",
+  "permissions": ["activeTab", "storage", "tabs"],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
+  ],
+  "action": {
+    "default_title": "Bully Page Safety Filter",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ]
+}

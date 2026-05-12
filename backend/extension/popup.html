@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bully Page Safety Filter</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Page Safety</h1>
+        <span id="apiStatus" class="status status-idle">API</span>
+      </header>
+
+      <form id="settingsForm">
+        <label class="toggle-row">
+          <span>Enabled</span>
+          <input id="enabled" type="checkbox">
+        </label>
+
+        <label>
+          <span>API URL</span>
+          <input id="apiUrl" type="url" spellcheck="false">
+        </label>
+
+        <div class="split">
+          <label>
+            <span>Severity %</span>
+            <input id="severityThresholdPercent" type="number" min="0" max="100">
+          </label>
+
+          <label>
+            <span>Negative words</span>
+            <input id="negativeWordThreshold" type="number" min="0">
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="saveButton" type="submit">Save</button>
+          <button id="testButton" type="button">Test API</button>
+        </div>
+      </form>
+
+      <section id="lastResult" class="result" hidden>
+        <h2>Last Check</h2>
+        <dl>
+          <div>
+            <dt>Decision</dt>
+            <dd id="lastDecision">-</dd>
+          </div>
+          <div>
+            <dt>Severity</dt>
+            <dd id="lastSeverity">-</dd>
+          </div>
+          <div>
+            <dt>Toxicity</dt>
+            <dd id="lastToxicity">-</dd>
+          </div>
+          <div>
+            <dt>Negative words</dt>
+            <dd id="lastNegativeWords">-</dd>
+          </div>
+        </dl>
+        <p id="lastUrl"></p>
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

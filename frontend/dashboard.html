@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NoBully — Moderation Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #f0f2f5;
+      color: #1a1d23;
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Nav ── */
+    nav {
+      background: #fff;
+      border-bottom: 1px solid #e4e7ec;
+      padding: 0 32px;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .nav-logo img {
+      width: 32px;
+      height: 32px;
+      object-fit: contain;
+    }
+
+    .nav-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #1a1d23;
+    }
+
+    .nav-title span { color: #e03347; }
+
+    .nav-badge {
+      font-size: 11px;
+      background: #f0f2f5;
+      color: #6b7280;
+      padding: 3px 10px;
+      border-radius: 20px;
+      border: 1px solid #e4e7ec;
+      font-weight: 500;
+    }
+
+    .nav-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    /* ── Main ── */
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 32px;
+    }
+
+    /* ── Alerts ── */
+    .alerts-section {
+      margin-bottom: 24px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #9ca3af;
+      margin-bottom: 10px;
+    }
+
+    .alert-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .alert-item {
+      background: #fff;
+      border: 1px solid #fecdd3;
+      border-left: 4px solid #e03347;
+      border-radius: 8px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      animation: slideIn 0.3s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .alert-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .alert-dot {
+      width: 8px;
+      height: 8px;
+      background: #e03347;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .alert-url {
+      font-weight: 600;
+      font-size: 13px;
+      color: #1a1d23;
+    }
+
+    .alert-meta {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 2px;
+    }
+
+    .alert-badge {
+      font-size: 11px;
+      font-weight: 600;
+      background: #fef2f2;
+      color: #e03347;
+      border: 1px solid #fecdd3;
+      padding: 3px 10px;
+      border-radius: 20px;
+      white-space: nowrap;
+    }
+
+    .no-alerts {
+      background: #fff;
+      border: 1px solid #e4e7ec;
+      border-radius: 8px;
+      padding: 16px;
+      color: #9ca3af;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    /* ── Stats ── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: #fff;
+      border: 1px solid #e4e7ec;
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+
+    .stat-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 700;
+      color: #1a1d23;
+      line-height: 1;
+    }
+
+    .stat-value.red   { color: #e03347; }
+    .stat-value.amber { color: #d97706; }
+    .stat-value.green { color: #059669; }
+
+    .stat-sub {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 5px;
+    }
+
+    /* ── History ── */
+    .history-card {
+      background: #fff;
+      border: 1px solid #e4e7ec;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .history-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px;
+      border-bottom: 1px solid #e4e7ec;
+    }
+
+    .history-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1a1d23;
+    }
+
+    .history-count {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+
+    /* ── Filter bar ── */
+    .filter-bar {
+      display: flex;
+      gap: 6px;
+      padding: 12px 20px;
+      border-bottom: 1px solid #f0f2f5;
+    }
+
+    .filter-chip {
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 14px;
+      border-radius: 20px;
+      border: 1px solid #e4e7ec;
+      color: #6b7280;
+      background: transparent;
+      cursor: pointer;
+      transition: 0.15s;
+    }
+
+    .filter-chip:hover { border-color: #1a1d23; color: #1a1d23; }
+    .filter-chip.active { background: #1a1d23; border-color: #1a1d23; color: #fff; }
+    .filter-chip.active.safe  { background: #059669; border-color: #059669; }
+    .filter-chip.active.warn  { background: #d97706; border-color: #d97706; color: #fff; }
+    .filter-chip.active.danger { background: #e03347; border-color: #e03347; }
+
+    /* ── Table ── */
+    .history-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .history-table th {
+      text-align: left;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: #9ca3af;
+      padding: 10px 20px;
+      border-bottom: 1px solid #e4e7ec;
+    }
+
+    .history-table tr.row {
+      border-bottom: 1px solid #f0f2f5;
+      transition: background 0.1s;
+    }
+
+    .history-table tr.row:last-child { border-bottom: none; }
+    .history-table tr.row:hover { background: #f9fafb; }
+
+    .history-table td {
+      padding: 12px 20px;
+      vertical-align: middle;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
+
+    .status-pill.blocked { background: #fef2f2; color: #e03347; }
+    .status-pill.caution { background: #fffbeb; color: #d97706; }
+    .status-pill.safe    { background: #f0fdf4; color: #059669; }
+
+    .status-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .row-url {
+      font-size: 13px;
+      font-weight: 500;
+      color: #1a1d23;
+    }
+
+    .row-url small {
+      display: block;
+      font-size: 11px;
+      color: #9ca3af;
+      font-weight: 400;
+      margin-top: 2px;
+    }
+
+    .score-wrap { min-width: 70px; }
+
+    .score-num {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .score-track {
+      height: 4px;
+      background: #f0f2f5;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+
+    .score-fill {
+      height: 100%;
+      border-radius: 2px;
+    }
+
+    .word-tag {
+      display: inline-block;
+      font-size: 10px;
+      background: #fef2f2;
+      border: 1px solid #fecdd3;
+      color: #e03347;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin: 1px 2px 1px 0;
+    }
+
+    .row-time {
+      font-size: 11px;
+      color: #9ca3af;
+      white-space: nowrap;
+    }
+
+    /* ── Empty ── */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 20px;
+      gap: 8px;
+      color: #9ca3af;
+      text-align: center;
+    }
+
+    .empty-icon { font-size: 32px; }
+    .empty-title { font-size: 15px; font-weight: 600; color: #6b7280; }
+    .empty-sub { font-size: 12px; }
+
+    /* ── Buttons ── */
+    .btn {
+      font-family: 'Inter', sans-serif;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 7px;
+      border: 1px solid #e4e7ec;
+      background: #fff;
+      color: #374151;
+      cursor: pointer;
+      transition: 0.15s;
+    }
+
+    .btn:hover { background: #f9fafb; border-color: #d1d5db; }
+    .btn.danger { color: #e03347; border-color: #fecdd3; }
+    .btn.danger:hover { background: #fef2f2; }
+
+    /* ── Footer ── */
+    footer {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 16px 32px;
+      font-size: 11px;
+      color: #9ca3af;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* ── Toast ── */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1a1d23;
+      color: #fff;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 13px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: 0.2s;
+      pointer-events: none;
+      z-index: 100;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 900px) {
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      main { padding: 20px; }
+      nav { padding: 0 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">
+    <img src="icons/icon32.png" alt="NoBully" />
+    <div class="nav-title">No<span>Bully</span></div>
+    <span class="nav-badge">Moderation Dashboard</span>
+  </div>
+  <div class="nav-right">
+    <button class="btn" id="exportBtn">Export JSON</button>
+    <button class="btn danger" id="clearAllBtn">Clear All</button>
+  </div>
+</nav>
+
+<main>
+
+  <!-- Alerts -->
+  <div class="alerts-section">
+    <div class="section-label">Live Alerts — Blocked Pages</div>
+    <div class="alert-list" id="alertList">
+      <div class="no-alerts">No blocked pages yet.</div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Pages Scanned</div>
+      <div class="stat-value" id="statTotal">0</div>
+      <div class="stat-sub" id="statTotalSub">0 pages</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Blocked</div>
+      <div class="stat-value red" id="statBlocked">0</div>
+      <div class="stat-sub" id="statBlockedPct">0% block rate</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg Toxicity</div>
+      <div class="stat-value amber" id="statAvgTox">0%</div>
+      <div class="stat-sub">across all scans</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Safe Pages</div>
+      <div class="stat-value green" id="statSafe">0</div>
+      <div class="stat-sub" id="statSafePct">0% safe rate</div>
+    </div>
+  </div>
+
+  <!-- History -->
+  <div class="history-card">
+    <div class="history-header">
+      <div class="history-title">Analysis History</div>
+      <div class="history-count" id="historyCount"></div>
+    </div>
+
+    <div class="filter-bar">
+      <button class="filter-chip active" data-filter="all">All</button>
+      <button class="filter-chip danger" data-filter="blocked">Blocked</button>
+      <button class="filter-chip warn" data-filter="caution">Caution</button>
+      <button class="filter-chip safe" data-filter="safe">Safe</button>
+    </div>
+
+    <div id="tableInner">
+      <div class="empty-state">
+        <div class="empty-icon">⏳</div>
+        <div class="empty-title">Loading history…</div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<footer>
+  <span>NoBully v1.0.0 — Content Safety Filter</span>
+  <span id="footerTimestamp"></span>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script src="dashboard.js"></script>
+</body>
+</html>
