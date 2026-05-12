@@ -209,12 +209,38 @@ document.getElementById('exportBtn').addEventListener('click', () => {
   showToast('Exported ' + allHistory.length + ' records.');
 });
 
+// ── Alerts ───────────────────────────────────────────────────────────────────
+
+function renderAlerts(history) {
+  const blocked = history.filter(h => getStatus(h).filter === 'blocked');
+  const container = document.getElementById('alertList');
+  if (blocked.length === 0) {
+    container.innerHTML = '<div class="no-alerts">No blocked pages yet.</div>';
+    return;
+  }
+  container.innerHTML = [...blocked].reverse().slice(0, 5).map(entry => {
+    const { host } = formatUrl(entry.url);
+    return `
+      <div class="alert-item">
+        <div class="alert-left">
+          <div class="alert-dot"></div>
+          <div>
+            <div class="alert-url">${escHtml(host)}</div>
+            <div class="alert-meta">${formatTime(entry.timestamp)} &mdash; ${entry.bad_word_count || 0} flagged words</div>
+          </div>
+        </div>
+        <span class="alert-badge">Toxicity ${entry.toxicity_percent || 0}%</span>
+      </div>`;
+  }).join('');
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 function loadData() {
   chrome.storage.local.get('analysisHistory', (result) => {
     allHistory = result.analysisHistory || [];
     renderStats(allHistory);
+    renderAlerts(allHistory);
     buildTable(allHistory);
   });
 }
